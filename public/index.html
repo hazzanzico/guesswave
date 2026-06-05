@@ -105,7 +105,6 @@ input::placeholder { color: var(--text3); }
 .hero-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--lime); animation: blink 1.6s ease infinite; }
 @keyframes blink { 0%,100%{opacity:1}50%{opacity:.2} }
 
-/* FIX 3: Tighter hero title scaling — was 3rem–5.5rem, now 2rem–4rem */
 .hero-title {
   font-family: var(--disp); font-size: clamp(2rem, 6vw, 4rem);
   font-weight: 800; line-height: .95; letter-spacing: -.02em;
@@ -181,7 +180,6 @@ input::placeholder { color: var(--text3); }
 
 .gb { display: flex; flex: 1; overflow: hidden; }
 
-/* FIX 3: Narrower sidebar on all sizes */
 .gsb { display: flex; flex-direction: column; width: 180px; flex-shrink: 0; background: var(--ink2); border-right: 1.5px solid var(--line); overflow: hidden; }
 .gsb-head { padding: 10px 12px 8px; border-bottom: 1.5px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
 .gsb-title { font-family: var(--mono); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--text3); }
@@ -227,7 +225,6 @@ input::placeholder { color: var(--text3); }
 .ann-timeout { background: rgba(255,94,91,.07);  border: 1.5px solid rgba(255,94,91,.3);  color: var(--coral); }
 .ann-round   { background: rgba(56,189,248,.06);  border: 1.5px solid rgba(56,189,248,.22); color: var(--sky); font-size: 13px; }
 
-/* FIX 3: Tighter control area padding */
 .gctrl { background: var(--ink2); border-top: 1.5px solid var(--line); padding: 10px 14px; flex-shrink: 0; }
 .qstrip { display: flex; align-items: flex-start; gap: 8px; background: var(--ink3); border: 1.5px solid var(--line2); border-radius: var(--r-md); padding: 8px 12px; margin-bottom: 8px; }
 .qstrip-icon  { color: var(--sky); font-size: 14px; flex-shrink: 0; margin-top: 1px; }
@@ -349,7 +346,6 @@ input::placeholder { color: var(--text3); }
 
 /* ══ RESPONSIVE ══════════════════════════════════════════════════════ */
 
-/* FIX 3: Tablet — tighten up sidebar and inputs */
 @media (max-width: 700px) {
   .gsb { width: 150px; }
   .hero-title { font-size: clamp(1.75rem, 8vw, 2.8rem); }
@@ -361,50 +357,40 @@ input::placeholder { color: var(--text3); }
   .qform-row input { width: 100%; }
 }
 
-/* FIX 3: Mobile — hide sidebar, scale inputs for touch */
 @media (max-width: 520px) {
-  /* Hide sidebar entirely on small phones */
   .gsb { display: none; }
   .gh-pcount { display: none; }
   .gh-share-label { display: none; }
   .gh-round { display: none; }
 
-  /* Landing hero shrinks further */
   .hero-title { font-size: clamp(1.6rem, 9vw, 2.2rem); }
   .hero-sub { font-size: 13px; }
   .lcard { padding: 1.25rem; border-radius: var(--r-lg); }
 
-  /* Touch-friendly inputs and buttons */
   input          { min-height: 48px; font-size: 16px; padding: 13px 14px; }
   .btn           { min-height: 48px; padding: 13px 20px; font-size: 15px; }
   .btn-icon      { width: 48px; height: 48px; font-size: 19px; }
   .tab-btn       { min-height: 42px; font-size: 13px; }
   .react-btn     { min-height: 44px; min-width: 44px; font-size: 20px; padding: 5px 10px; }
 
-  /* Control area fills width cleanly */
   .start-row     { flex-wrap: wrap; }
   .start-row .btn { flex: 1; min-width: 120px; }
 
-  /* Chat bubbles wider on small screens */
   .msg { max-width: 90%; }
 
-  /* Reduce header height */
   .gh { height: 48px; padding: 0 12px; gap: .5rem; }
   .gh-logo { font-size: 1rem; }
   .gh-pill { padding: 3px 9px 3px 7px; }
   .gh-share { padding: 3px 9px; min-height: 28px; font-size: 11px; }
 
-  /* Game-over screen */
   .go-champion { padding: 1.25rem 1.5rem; }
   .go-champ-crown { font-size: 2rem; }
   .go-champ-name  { font-size: 1.4rem; }
 
-  /* Reaction bar wraps neatly */
   .reactions-bar { gap: 4px; }
   .react-btn { min-width: 40px; font-size: 18px; }
 }
 
-/* FIX 3: Very small phones (SE, Galaxy A series in portrait) */
 @media (max-width: 360px) {
   .hero-title { font-size: 1.5rem; }
   input { min-height: 44px; }
@@ -462,7 +448,6 @@ input::placeholder { color: var(--text3); }
     </div>
     <div class="gh-timer hidden" id="timer-wrap">
       <div class="timer-ring">
-        <!-- FIX 3: Slightly smaller ring to save header space on mobile -->
         <svg viewBox="0 0 36 36" width="36" height="36">
           <circle class="timer-track" cx="18" cy="18" r="15"/>
           <circle class="timer-arc"   cx="18" cy="18" r="15" id="timer-arc"/>
@@ -542,7 +527,6 @@ const S = {
   myReady:         false,
   readyCount:      0,
   nonGMCount:      0,
-  // FIX 2: track whether the first game has ever launched in this session
   firstGameStarted: false,
 };
 
@@ -621,15 +605,15 @@ function showFloatReaction(emoji, fromName) {
   setTimeout(() => el.remove(), 2600);
 }
 
-/* ── Socket — FIX 4: reconnection + heartbeat tuning ───────────── */
+/* ── Socket ─────────────────────────────────────────────────────── */
 const socket = io({
   reconnection:        true,
-  reconnectionAttempts: Infinity,   // keep trying forever
-  reconnectionDelay:   1000,        // start retrying after 1s
-  reconnectionDelayMax: 5000,       // cap at 5s between retries
+  reconnectionAttempts: Infinity,
+  reconnectionDelay:   1000,
+  reconnectionDelayMax: 5000,
   randomizationFactor: 0.3,
-  timeout:             10000,       // connection timeout 10s
-  transports:          ['websocket', 'polling'], // websocket first
+  timeout:             10000,
+  transports:          ['websocket', 'polling'],
 });
 
 /* ── Read session code from shareable URL ───────────────────────── */
@@ -718,6 +702,11 @@ function enterGame(data, name) {
   updateRoundDisplay();
   renderPlayers();
   renderControls();
+
+  /* FIX 1: Save session token inside enterGame where data & name are in scope */
+  localStorage.setItem('gw_token',   data.playerId);
+  localStorage.setItem('gw_session', data.sessionId);
+  localStorage.setItem('gw_name',    name);
 }
 
 /* ── Round display ──────────────────────────────────────────────── */
@@ -745,7 +734,6 @@ function renderPlayers() {
     const onFire = streak >= 2;
     const scoreColor = p.score > 0 ? 'var(--lime)' : 'var(--text3)';
     const rankColor  = idx < 3 ? RANK_COLORS[idx] : 'transparent';
-    // FIX 2: only show ready tag when first game hasn't started and game is waiting
     const showReady  = S.gameStatus === 'waiting' && !S.firstGameStarted && !isGM && p.ready;
     return `
       <div class="gpi${isMe?' me':''}">
@@ -798,7 +786,6 @@ function renderControls() {
       const ar  = ngc > 0 && rc === ngc;
       const enoughPlayers = S.players.length >= 3;
 
-      // FIX 2 + FIX 5: Between rounds, skip ready check — just need 3+ players + question
       const canStart = S.firstGameStarted
         ? (enoughPlayers && S.questionSet)
         : (enoughPlayers && ar && S.questionSet);
@@ -827,7 +814,6 @@ function renderControls() {
         $('q-input').addEventListener('keydown', e => { if (e.key==='Enter') $('a-input').focus(); });
         $('a-input').addEventListener('keydown', e => { if (e.key==='Enter') setQuestion(); });
       } else {
-        // FIX 2: Only show ready bar before first game
         const readyBarHtml = !S.firstGameStarted ? `
           <div class="ready-bar">
             <span class="ready-bar-count${ar?' all-ready':''}">
@@ -849,7 +835,6 @@ function renderControls() {
       }
 
     } else {
-      // FIX 2: Between rounds, players don't need to ready up — just show a waiting message
       if (S.firstGameStarted) {
         const waitMsg = S.questionSet
           ? `Waiting for <b style="color:var(--text)">${esc(gmName())}</b> to start…`
@@ -860,7 +845,6 @@ function renderControls() {
             ${waitMsg}
           </div>`;
       } else {
-        // First game — show ready button
         const readyClass = S.myReady ? 'is-ready' : '';
         const readyLabel = S.myReady ? '✓ Ready!' : 'Click to Ready Up';
         const waitMsg    = S.questionSet
@@ -985,6 +969,9 @@ function playAgain() {
 
 /* ── Leave ──────────────────────────────────────────────────────── */
 function leaveGame() {
+  localStorage.removeItem('gw_token');
+  localStorage.removeItem('gw_session');
+  localStorage.removeItem('gw_name');
   socket.disconnect();
   location.reload();
 }
@@ -993,7 +980,6 @@ function leaveGame() {
 function startTimer(duration) {
   clearInterval(S.timerInterval);
   let left = duration;
-  // FIX 3: updated circumference for smaller ring (r=15 → 2πr ≈ 94.25 ≈ 95)
   const CIRC = 94;
   const arcEl = $('timer-arc'), numEl = $('timer-num'), wrap = $('timer-wrap');
   wrap.classList.remove('hidden');
@@ -1111,7 +1097,7 @@ socket.on('game-started', ({ question, duration, players, roundNumber, totalRoun
   S.canGuess         = !S.isGM;
   S.roundNumber      = roundNumber || S.roundNumber;
   S.totalRounds      = totalRounds || S.totalRounds;
-  S.firstGameStarted = true;   // mark that the first game has launched
+  S.firstGameStarted = true;
   renderPlayers(); renderControls(); updateRoundDisplay();
   startTimer(duration);
   addMsg('sys', S.isGM ? '🚀 Game started! Watch the guesses.' : '🚀 Round started! 3 attempts — go!');
@@ -1166,7 +1152,6 @@ socket.on('new-round', ({ gameMasterId, gameMasterName, players, scores, roundNu
   S.canGuess     = true;
   S.myReady      = false;
   S.readyCount   = 0;
-  // FIX 2: Between rounds we keep firstGameStarted = true (no ready needed)
   S.nonGMCount   = players.filter(p => p.id !== gameMasterId).length;
   S.roundNumber  = roundNumber || S.roundNumber;
   S.totalRounds  = totalRounds || S.totalRounds;
@@ -1204,7 +1189,6 @@ socket.on('play-again-started', ({ gameMasterId, gameMasterName, players, roundN
   S.roundNumber      = roundNumber || 1;
   S.totalRounds      = totalRounds || players.length;
   S.streakMap        = {};
-  // FIX 2: Reset firstGameStarted so ready system is required again for new game
   S.firstGameStarted = false;
 
   players.forEach((p, i) => {
@@ -1227,18 +1211,49 @@ socket.on('play-again-started', ({ gameMasterId, gameMasterName, players, roundN
   else showToast(`New game! ${gameMasterName} is GM. Click Ready when set.`);
 });
 
-/* FIX 4: Better disconnect/reconnect feedback */
+/* FIX 3: Replace socket.on('reconnect') with socket.on('connect') for rejoin logic */
+socket.on('connect', () => {
+  const token   = localStorage.getItem('gw_token');
+  const session = localStorage.getItem('gw_session');
+  if (token && session && $('game').classList.contains('active')) {
+    socket.emit('rejoin-session', { token, sessionId: session });
+  }
+});
+
+/* FIX 4: New rejoined + player-reconnected events */
+socket.on('rejoined', (data) => {
+  S.playerId         = data.playerId;
+  S.sessionId        = data.sessionId;
+  S.isGM             = data.isGameMaster;
+  S.gameMasterId     = data.gameMasterId;
+  S.players          = data.players;
+  S.gameStatus       = data.gameStatus;
+  S.question         = data.question;
+  S.attemptsLeft     = data.attemptsLeft;
+  S.roundNumber      = data.roundNumber;
+  S.totalRounds      = data.totalRounds;
+  S.firstGameStarted = data.firstGameStarted;
+  S.readyCount       = data.readyCount || 0;
+  S.nonGMCount       = data.nonGMCount || 0;
+  S.canGuess         = !data.isGameMaster && data.attemptsLeft > 0 && data.gameStatus === 'in-progress';
+  renderPlayers(); renderControls(); updateRoundDisplay();
+  showToast('✅ Reconnected!');
+});
+
+socket.on('player-reconnected', ({ playerName, players }) => {
+  S.players = players;
+  renderPlayers();
+  addMsg('sys', `${playerName} reconnected`);
+});
+
+/* FIX 4: Disconnect/reconnect feedback — old reconnect event removed above */
 socket.on('disconnect', (reason) => {
   if (reason === 'io server disconnect') {
-    // Server kicked us — reload
     showToast('Disconnected by server. Reloading…');
     setTimeout(() => location.reload(), 2000);
   } else {
     showToast('Connection lost — reconnecting…');
   }
-});
-socket.on('reconnect', (attempt) => {
-  showToast(`Back online! (attempt ${attempt})`);
 });
 socket.on('reconnect_error', () => {
   showToast('Still trying to reconnect…');

@@ -1,29 +1,51 @@
+require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const path = require("path");
+const { Redis } = require("@upstash/redis");
 
 const app = express();
 const server = http.createServer(app);
 
-// FIX 4: Better pingInterval/pingTimeout to survive network hiccups
 const io = new Server(server, {
   cors: { origin: "*" },
-  pingInterval: 10000,   // send heartbeat every 10s (was default 25s)
-  pingTimeout: 30000,    // wait 30s before declaring dead (was 60s but no pingInterval set)
+  pingInterval: 10000,
+  pingTimeout: 30000,
   connectTimeout: 10000,
-  transports: ["websocket", "polling"], // websocket first, polling as fallback
+  transports: ["websocket", "polling"],
+});
+
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
 app.use(express.static(path.join(__dirname, "public")));
-
 app.get("/join/:sessionId", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-// ─── In-Memory State ──────────────────────────────────────────────────────────
-const sessions = {};
+// ─── In-Memory (transient — rebuilt on reconnect) ─────────────────────────────
 const socketToSession = {};
+const disconnectTimers = {};
+
+// ─── Redis Helpers ────────────────────────────────────────────────────────────
+const SESSION_TTL = 60 * 60 * 24; // 24 hours
+
+async function getSession(sessionId) {
+  if (!sessionId) return null;
+  const data = await redis.get(`session:${sessionId}`);
+  return data || null;
+}
+
+async function saveSession(session) {
+  await redis.set(`session:${session.id}`, session, { ex: SESSION_TTL });
+}
+
+async function deleteSession(sessionId) {
+  await redis.del(`session:${sessionId}`);
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function generateId(len = 6) {
@@ -48,8 +70,6 @@ function resetAttempts(session) {
   Object.values(session.players).forEach((p) => {
     p.attempts = 3;
     p.active = true;
-    // FIX 2: Only reset ready for the very first game start.
-    // Between rounds we no longer use the ready system — so don't touch p.ready here.
   });
 }
 
@@ -73,7 +93,6 @@ function nextGMId(session) {
   return null;
 }
 
-// FIX 2: readyCount / nonGMCount / allReady only matter for the very first game
 function readyCount(session) {
   return Object.values(session.players).filter(
     (p) => p.id !== session.gameMasterId && p.ready
@@ -94,11 +113,10 @@ function allReady(session) {
 }
 
 // ─── Core Game Logic ──────────────────────────────────────────────────────────
-function endGame(sessionId, winner = null, reason = null) {
-  const session = sessions[sessionId];
+async function endGame(sessionId, winner = null, reason = null) {
+  const session = await getSession(sessionId);
   if (!session || session.status !== "in-progress") return;
 
-  clearTimeout(session.timer);
   session.status = "round-over";
   session.winnerId = winner ? winner.id : null;
 
@@ -116,6 +134,7 @@ function endGame(sessionId, winner = null, reason = null) {
   }
 
   const scores = getScores(session);
+  await saveSession(session);
 
   if (winner) {
     io.to(sessionId).emit("game-won", {
@@ -133,9 +152,9 @@ function endGame(sessionId, winner = null, reason = null) {
     });
   }
 
-  setTimeout(() => {
-    if (!sessions[sessionId]) return;
-    const s = sessions[sessionId];
+  setTimeout(async () => {
+    const s = await getSession(sessionId);
+    if (!s) return;
 
     if (s.players[s.gameMasterId]) {
       s.players[s.gameMasterId].hasBeenGM = true;
@@ -146,6 +165,7 @@ function endGame(sessionId, winner = null, reason = null) {
       s.status = "game-over";
       const finalScores = getScores(s);
       const champion = finalScores[0];
+      await saveSession(s);
       io.to(sessionId).emit("game-over", {
         champion: champion || null,
         scores: finalScores,
@@ -160,6 +180,7 @@ function endGame(sessionId, winner = null, reason = null) {
     s.winnerId = null;
     s.roundNumber++;
     resetAttempts(s);
+    await saveSession(s);
 
     io.to(sessionId).emit("new-round", {
       gameMasterId: nextId,
@@ -176,21 +197,20 @@ function endGame(sessionId, winner = null, reason = null) {
 io.on("connection", (socket) => {
 
   // ── CREATE SESSION ──────────────────────────────────────────────────────────
-  socket.on("create-session", ({ playerName }, cb) => {
+  socket.on("create-session", async ({ playerName }, cb) => {
     playerName = (playerName || "").trim();
     if (!playerName || playerName.length < 2 || playerName.length > 20) {
       return cb({ error: "Name must be 2–20 characters." });
     }
 
     const sessionId = generateId();
-    sessions[sessionId] = {
+    const session = {
       id: sessionId,
       gameMasterId: socket.id,
       originalHostId: socket.id,
       question: null,
       answer: null,
       status: "waiting",
-      timer: null,
       winnerId: null,
       gmQueue: [socket.id],
       originalGmQueue: [socket.id],
@@ -198,13 +218,13 @@ io.on("connection", (socket) => {
       totalRounds: 1,
       streakPlayerId: null,
       streakCount: 0,
-      // FIX 2: track whether the first game has ever started
       firstGameStarted: false,
       players: {},
     };
 
-    sessions[sessionId].players[socket.id] = {
+    session.players[socket.id] = {
       id: socket.id,
+      originalId: socket.id,
       name: playerName,
       score: 0,
       attempts: 3,
@@ -213,6 +233,7 @@ io.on("connection", (socket) => {
       ready: false,
     };
 
+    await saveSession(session);
     socket.join(sessionId);
     socketToSession[socket.id] = sessionId;
 
@@ -222,7 +243,7 @@ io.on("connection", (socket) => {
       playerId: socket.id,
       isGameMaster: true,
       gameMasterId: socket.id,
-      players: getPlayers(sessions[sessionId]),
+      players: getPlayers(session),
       roundNumber: 1,
       totalRounds: 1,
       firstGameStarted: false,
@@ -230,7 +251,7 @@ io.on("connection", (socket) => {
   });
 
   // ── JOIN SESSION ────────────────────────────────────────────────────────────
-  socket.on("join-session", ({ playerName, sessionId }, cb) => {
+  socket.on("join-session", async ({ playerName, sessionId }, cb) => {
     playerName = (playerName || "").trim();
     sessionId = (sessionId || "").trim().toUpperCase();
 
@@ -239,11 +260,9 @@ io.on("connection", (socket) => {
     }
     if (!sessionId) return cb({ error: "Session code is required." });
 
-    const session = sessions[sessionId];
+    const session = await getSession(sessionId);
     if (!session) return cb({ error: "Session not found. Check the code." });
 
-    // FIX 1: Block join on ANY status that isn't "waiting".
-    // Previously only "in-progress" was blocked, letting "round-over" slip through.
     if (session.status !== "waiting") {
       return cb({ error: "Game already in progress. You cannot join now." });
     }
@@ -255,6 +274,7 @@ io.on("connection", (socket) => {
 
     session.players[socket.id] = {
       id: socket.id,
+      originalId: socket.id,
       name: playerName,
       score: 0,
       attempts: 3,
@@ -267,6 +287,7 @@ io.on("connection", (socket) => {
     session.originalGmQueue.push(socket.id);
     session.totalRounds = Object.keys(session.players).length;
 
+    await saveSession(session);
     socket.join(sessionId);
     socketToSession[socket.id] = sessionId;
 
@@ -294,19 +315,72 @@ io.on("connection", (socket) => {
     });
   });
 
-  // ── PLAYER READY (toggle) — only used before first game ────────────────────
-  socket.on("player-ready", (cb) => {
+  // ── REJOIN SESSION ──────────────────────────────────────────────────────────
+  socket.on("rejoin-session", async ({ token, sessionId }, cb) => {
+    const session = await getSession(sessionId);
+    if (!session) return cb && cb({ error: "Session not found." });
+
+    const player = Object.values(session.players).find(p => p.originalId === token);
+    if (!player) return cb && cb({ error: "Player not found in session." });
+
+    // cancel grace period timer if still running
+    if (disconnectTimers[token]) {
+      clearTimeout(disconnectTimers[token]);
+      delete disconnectTimers[token];
+    }
+
+    const oldId = player.id;
+
+    // remap to new socket id
+    delete session.players[oldId];
+    delete socketToSession[oldId];
+
+    player.id = socket.id;
+    session.players[socket.id] = player;
+
+    session.gmQueue = session.gmQueue.map(id => id === oldId ? socket.id : id);
+    session.originalGmQueue = session.originalGmQueue.map(id => id === oldId ? socket.id : id);
+    if (session.gameMasterId === oldId) session.gameMasterId = socket.id;
+
+    await saveSession(session);
+    socket.join(sessionId);
+    socketToSession[socket.id] = sessionId;
+
+    socket.emit("rejoined", {
+      sessionId,
+      playerId: socket.id,
+      originalId: token,
+      isGameMaster: session.gameMasterId === socket.id,
+      gameMasterId: session.gameMasterId,
+      players: getPlayers(session),
+      question: session.question,
+      gameStatus: session.status,
+      roundNumber: session.roundNumber,
+      totalRounds: session.totalRounds,
+      attemptsLeft: player.attempts,
+      firstGameStarted: session.firstGameStarted,
+      readyCount: readyCount(session),
+      nonGMCount: nonGMCount(session),
+    });
+
+    socket.to(sessionId).emit("player-reconnected", {
+      playerId: socket.id,
+      playerName: player.name,
+      players: getPlayers(session),
+    });
+
+    if (cb) cb({ success: true });
+  });
+
+  // ── PLAYER READY ────────────────────────────────────────────────────────────
+  socket.on("player-ready", async (cb) => {
     const sessionId = socketToSession[socket.id];
-    const session = sessions[sessionId];
+    const session = await getSession(sessionId);
 
     if (!session) return cb && cb({ error: "Not in a session." });
     if (session.status !== "waiting") return cb && cb({ error: "Game is not in lobby." });
     if (session.gameMasterId === socket.id) return cb && cb({ error: "GM doesn't need to ready up." });
-
-    // FIX 2: ready-up only matters before the first game
-    if (session.firstGameStarted) {
-      return cb && cb({ error: "Ready system only used before the first game." });
-    }
+    if (session.firstGameStarted) return cb && cb({ error: "Ready system only used before the first game." });
 
     const player = session.players[socket.id];
     if (!player) return cb && cb({ error: "Player not found." });
@@ -315,6 +389,8 @@ io.on("connection", (socket) => {
 
     const rc  = readyCount(session);
     const ngc = nonGMCount(session);
+
+    await saveSession(session);
 
     io.to(sessionId).emit("ready-update", {
       playerId:   socket.id,
@@ -330,9 +406,9 @@ io.on("connection", (socket) => {
   });
 
   // ── SET QUESTION ────────────────────────────────────────────────────────────
-  socket.on("set-question", ({ question, answer }, cb) => {
+  socket.on("set-question", async ({ question, answer }, cb) => {
     const sessionId = socketToSession[socket.id];
-    const session = sessions[sessionId];
+    const session = await getSession(sessionId);
 
     if (!session) return cb({ error: "Not in a session." });
     if (session.gameMasterId !== socket.id) return cb({ error: "Only the game master can do that." });
@@ -348,6 +424,8 @@ io.on("connection", (socket) => {
     session.question = question;
     session.answer   = answer.toLowerCase();
 
+    await saveSession(session);
+
     io.to(sessionId).emit("question-set", {
       question:       session.question,
       gameMasterName: session.players[socket.id].name,
@@ -357,9 +435,9 @@ io.on("connection", (socket) => {
   });
 
   // ── START GAME ──────────────────────────────────────────────────────────────
-  socket.on("start-game", (cb) => {
+  socket.on("start-game", async (cb) => {
     const sessionId = socketToSession[socket.id];
-    const session   = sessions[sessionId];
+    const session   = await getSession(sessionId);
 
     if (!session) return cb({ error: "Not in a session." });
     if (session.gameMasterId !== socket.id) return cb({ error: "Only the game master can start." });
@@ -367,8 +445,6 @@ io.on("connection", (socket) => {
     if (!session.question || !session.answer) return cb({ error: "Set a question and answer first." });
     if (session.status === "in-progress")   return cb({ error: "Game already running." });
 
-    // FIX 2 + FIX 5: Only enforce ready-check before the first game.
-    // Between rounds the GM can start as soon as question is set + 3+ players.
     if (!session.firstGameStarted) {
       if (!allReady(session)) {
         const rc  = readyCount(session);
@@ -382,6 +458,8 @@ io.on("connection", (socket) => {
     session.totalRounds      = playerCount(session);
     resetAttempts(session);
 
+    await saveSession(session);
+
     io.to(sessionId).emit("game-started", {
       question:     session.question,
       duration:     60,
@@ -390,9 +468,10 @@ io.on("connection", (socket) => {
       totalRounds:  session.totalRounds,
     });
 
-    session.timer = setTimeout(() => {
-      if (sessions[sessionId] && sessions[sessionId].status === "in-progress") {
-        endGame(sessionId, null);
+    setTimeout(async () => {
+      const s = await getSession(sessionId);
+      if (s && s.status === "in-progress") {
+        await endGame(sessionId, null);
       }
     }, 60000);
 
@@ -400,9 +479,9 @@ io.on("connection", (socket) => {
   });
 
   // ── SUBMIT GUESS ────────────────────────────────────────────────────────────
-  socket.on("submit-guess", ({ guess }, cb) => {
+  socket.on("submit-guess", async ({ guess }, cb) => {
     const sessionId = socketToSession[socket.id];
-    const session   = sessions[sessionId];
+    const session   = await getSession(sessionId);
 
     if (!session) return cb({ error: "Not in a session." });
     if (session.status !== "in-progress") return cb({ error: "Game is not running." });
@@ -413,13 +492,15 @@ io.on("connection", (socket) => {
     if (!player.active || player.attempts <= 0) return cb({ error: "No attempts remaining." });
 
     guess = (guess || "").trim();
-    if (!guess)              return cb({ error: "Guess cannot be empty." });
-    if (guess.length > 200)  return cb({ error: "Guess is too long." });
+    if (!guess)             return cb({ error: "Guess cannot be empty." });
+    if (guess.length > 200) return cb({ error: "Guess is too long." });
 
     player.attempts--;
     if (player.attempts === 0) player.active = false;
 
     const isCorrect = guess.toLowerCase() === session.answer;
+
+    await saveSession(session);
 
     io.to(sessionId).emit("player-guessed", {
       playerId:     socket.id,
@@ -431,26 +512,22 @@ io.on("connection", (socket) => {
 
     if (isCorrect) {
       cb({ success: true, correct: true });
-      endGame(sessionId, { id: socket.id, name: player.name });
+      await endGame(sessionId, { id: socket.id, name: player.name });
     } else {
       cb({ success: true, correct: false, attemptsLeft: player.attempts });
       if (activePlayers(session).length === 0) {
-        endGame(sessionId, null, "All players used their attempts.");
+        await endGame(sessionId, null, "All players used their attempts.");
       }
     }
   });
 
   // ── PLAY AGAIN ─────────────────────────────────────────────────────────────
-  socket.on("play-again", (cb) => {
+  socket.on("play-again", async (cb) => {
     const sessionId = socketToSession[socket.id];
-    const session   = sessions[sessionId];
+    const session   = await getSession(sessionId);
 
     if (!session) return cb && cb({ error: "Not in a session." });
     if (session.status !== "game-over") return cb && cb({ error: "Game is not over yet." });
-
-    if (session.players[socket.id]) {
-      session.players[socket.id].wantsPlayAgain = true;
-    }
 
     function pickNewGM(s) {
       for (const id of s.originalGmQueue) {
@@ -461,19 +538,17 @@ io.on("connection", (socket) => {
 
     const newGMId = pickNewGM(session);
 
-    session.status         = "waiting";
-    session.gameMasterId   = newGMId;
-    session.question       = null;
-    session.answer         = null;
-    session.winnerId       = null;
-    session.roundNumber    = 1;
-    session.totalRounds    = Object.keys(session.players).length;
-    session.streakPlayerId = null;
-    session.streakCount    = 0;
-    // FIX 2: reset firstGameStarted so ready system kicks in again for the new game
+    session.status           = "waiting";
+    session.gameMasterId     = newGMId;
+    session.question         = null;
+    session.answer           = null;
+    session.winnerId         = null;
+    session.roundNumber      = 1;
+    session.totalRounds      = Object.keys(session.players).length;
+    session.streakPlayerId   = null;
+    session.streakCount      = 0;
     session.firstGameStarted = false;
-
-    session.gmQueue = session.originalGmQueue.filter(id => session.players[id]);
+    session.gmQueue          = session.originalGmQueue.filter(id => session.players[id]);
 
     Object.values(session.players).forEach(p => {
       p.score          = 0;
@@ -484,14 +559,16 @@ io.on("connection", (socket) => {
       p.wantsPlayAgain = false;
     });
 
+    await saveSession(session);
+
     io.to(sessionId).emit("play-again-started", {
-      gameMasterId:   newGMId,
-      gameMasterName: session.players[newGMId].name,
-      players:        getPlayers(session),
-      roundNumber:    1,
-      totalRounds:    session.totalRounds,
-      readyCount:     0,
-      nonGMCount:     nonGMCount(session),
+      gameMasterId:     newGMId,
+      gameMasterName:   session.players[newGMId].name,
+      players:          getPlayers(session),
+      roundNumber:      1,
+      totalRounds:      session.totalRounds,
+      readyCount:       0,
+      nonGMCount:       nonGMCount(session),
       firstGameStarted: false,
     });
 
@@ -499,9 +576,9 @@ io.on("connection", (socket) => {
   });
 
   // ── SEND REACTION ───────────────────────────────────────────────────────────
-  socket.on("send-reaction", ({ emoji }, cb) => {
+  socket.on("send-reaction", async ({ emoji }, cb) => {
     const sessionId = socketToSession[socket.id];
-    const session   = sessions[sessionId];
+    const session   = await getSession(sessionId);
     if (!session) return;
     const player = session.players[socket.id];
     if (!player) return;
@@ -512,80 +589,104 @@ io.on("connection", (socket) => {
   });
 
   // ── DISCONNECT ──────────────────────────────────────────────────────────────
-  socket.on("disconnect", () => {
+  socket.on("disconnect", async () => {
     const sessionId = socketToSession[socket.id];
-    if (!sessionId || !sessions[sessionId]) return;
+    delete socketToSession[socket.id];
 
-    const session       = sessions[sessionId];
+    if (!sessionId) return;
+
+    const session = await getSession(sessionId);
+    if (!session) return;
+
     const leavingPlayer = session.players[socket.id];
     if (!leavingPlayer) return;
 
-    delete session.players[socket.id];
-    delete socketToSession[socket.id];
+    const token    = leavingPlayer.originalId;
+    const socketId = socket.id;
 
-    session.gmQueue = session.gmQueue.filter((id) => id !== socket.id);
+    // Grace period: give them 30s to reconnect before removing
+    disconnectTimers[token] = setTimeout(async () => {
+      delete disconnectTimers[token];
 
-    if (playerCount(session) === 0) {
-      clearTimeout(session.timer);
-      delete sessions[sessionId];
-      return;
-    }
+      const s = await getSession(sessionId);
+      if (!s) return;
 
-    socket.to(sessionId).emit("player-left", {
-      playerId:   socket.id,
-      playerName: leavingPlayer.name,
-      players:    getPlayers(session),
-      readyCount: readyCount(session),
-      nonGMCount: nonGMCount(session),
-    });
+      // If they already rejoined with a new socket, skip removal
+      const stillThere = Object.values(s.players).find(p => p.originalId === token);
+      if (!stillThere || stillThere.id !== socketId) return;
 
-    if (session.gameMasterId === socket.id) {
-      const newGMId = nextGMId(session) || Object.keys(session.players)[0];
-      session.gameMasterId = newGMId;
+      const player = s.players[socketId];
+      if (!player) return;
 
-      if (session.status === "in-progress") {
-        clearTimeout(session.timer);
-        session.status = "round-over";
-        io.to(sessionId).emit("game-timeout", {
-          answer: session.answer,
-          scores: getScores(session),
-          reason: "Game master disconnected.",
-        });
-        setTimeout(() => {
-          if (!sessions[sessionId]) return;
-          const s = sessions[sessionId];
-          if (s.players[s.gameMasterId]) s.players[s.gameMasterId].hasBeenGM = true;
-          const nextId = nextGMId(s);
-          if (!nextId) {
-            s.status = "game-over";
-            io.to(sessionId).emit("game-over", {
-              champion: getScores(s)[0] || null,
-              scores:   getScores(s),
-            });
-            return;
-          }
-          s.gameMasterId = nextId;
-          s.question     = null;
-          s.answer       = null;
-          s.status       = "waiting";
-          s.roundNumber++;
-          resetAttempts(s);
-          io.to(sessionId).emit("new-round", {
-            gameMasterId:   nextId,
-            gameMasterName: s.players[nextId].name,
-            players:        getPlayers(s),
-            scores:         getScores(s),
-            roundNumber:    s.roundNumber,
-            totalRounds:    s.totalRounds,
-          });
-        }, 4000);
-      } else if (session.status === "waiting") {
-        io.to(sessionId).emit("new-game-master", {
-          gameMasterId:   newGMId,
-          gameMasterName: session.players[newGMId].name,
-        });
+      delete s.players[socketId];
+      s.gmQueue = s.gmQueue.filter(id => id !== socketId);
+
+      if (playerCount(s) === 0) {
+        await deleteSession(sessionId);
+        return;
       }
-    }
+
+      await saveSession(s);
+
+      socket.to(sessionId).emit("player-left", {
+        playerId:   socketId,
+        playerName: player.name,
+        players:    getPlayers(s),
+        readyCount: readyCount(s),
+        nonGMCount: nonGMCount(s),
+      });
+
+      if (s.gameMasterId === socketId) {
+        const newGMId = nextGMId(s) || Object.keys(s.players)[0];
+        s.gameMasterId = newGMId;
+
+        if (s.status === "in-progress") {
+          s.status = "round-over";
+          await saveSession(s);
+          io.to(sessionId).emit("game-timeout", {
+            answer: s.answer,
+            scores: getScores(s),
+            reason: "Game master disconnected.",
+          });
+          setTimeout(async () => {
+            const fresh = await getSession(sessionId);
+            if (!fresh) return;
+            if (fresh.players[fresh.gameMasterId]) fresh.players[fresh.gameMasterId].hasBeenGM = true;
+            const nextId = nextGMId(fresh);
+            if (!nextId) {
+              fresh.status = "game-over";
+              await saveSession(fresh);
+              io.to(sessionId).emit("game-over", {
+                champion: getScores(fresh)[0] || null,
+                scores:   getScores(fresh),
+              });
+              return;
+            }
+            fresh.gameMasterId = nextId;
+            fresh.question     = null;
+            fresh.answer       = null;
+            fresh.status       = "waiting";
+            fresh.roundNumber++;
+            resetAttempts(fresh);
+            await saveSession(fresh);
+            io.to(sessionId).emit("new-round", {
+              gameMasterId:   nextId,
+              gameMasterName: fresh.players[nextId].name,
+              players:        getPlayers(fresh),
+              scores:         getScores(fresh),
+              roundNumber:    fresh.roundNumber,
+              totalRounds:    fresh.totalRounds,
+            });
+          }, 4000);
+        } else if (s.status === "waiting") {
+          await saveSession(s);
+          io.to(sessionId).emit("new-game-master", {
+            gameMasterId:   newGMId,
+            gameMasterName: s.players[newGMId].name,
+          });
+        }
+      }
+    }, 30000);
   });
 });
 
