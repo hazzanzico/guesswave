@@ -30,6 +30,12 @@ app.get("/join/:sessionId", (req, res) => {
 const socketToSession = {};
 const disconnectTimers = {};
 
+// ─── Broadcast live connection count to all connected clients ─────────────────
+function broadcastLiveCount() {
+  const count = io.engine.clientsCount;
+  io.emit("live-count", { count });
+}
+
 // ─── Redis Helpers ────────────────────────────────────────────────────────────
 const SESSION_TTL = 60 * 60 * 24; // 24 hours
 
@@ -196,6 +202,8 @@ async function endGame(sessionId, winner = null, reason = null) {
 // ─── Socket Events ────────────────────────────────────────────────────────────
 io.on("connection", (socket) => {
 
+  broadcastLiveCount();
+
   // ── CREATE SESSION ──────────────────────────────────────────────────────────
   socket.on("create-session", async ({ playerName }, cb) => {
     playerName = (playerName || "").trim();
@@ -323,7 +331,6 @@ io.on("connection", (socket) => {
     const player = Object.values(session.players).find(p => p.originalId === token);
     if (!player) return cb && cb({ error: "Player not found in session." });
 
-    // cancel grace period timer if still running
     if (disconnectTimers[token]) {
       clearTimeout(disconnectTimers[token]);
       delete disconnectTimers[token];
@@ -331,7 +338,6 @@ io.on("connection", (socket) => {
 
     const oldId = player.id;
 
-    // remap to new socket id
     delete session.players[oldId];
     delete socketToSession[oldId];
 
@@ -345,6 +351,13 @@ io.on("connection", (socket) => {
     await saveSession(session);
     socket.join(sessionId);
     socketToSession[socket.id] = sessionId;
+
+    // If game is in progress, include timing info for client to sync timer
+    const timingInfo = {};
+    if (session.status === "in-progress" && session.roundStartTime) {
+      timingInfo.roundStartTime = session.roundStartTime;
+      timingInfo.roundDuration = session.roundDuration || 60;
+    }
 
     socket.emit("rejoined", {
       sessionId,
@@ -361,6 +374,7 @@ io.on("connection", (socket) => {
       firstGameStarted: session.firstGameStarted,
       readyCount: readyCount(session),
       nonGMCount: nonGMCount(session),
+      ...timingInfo,
     });
 
     socket.to(sessionId).emit("player-reconnected", {
@@ -453,19 +467,25 @@ io.on("connection", (socket) => {
       }
     }
 
+    const ROUND_DURATION = 60;
+    const roundStartTime = Date.now();
+
     session.status           = "in-progress";
     session.firstGameStarted = true;
     session.totalRounds      = playerCount(session);
+    session.roundStartTime   = roundStartTime;
+    session.roundDuration    = ROUND_DURATION;
     resetAttempts(session);
 
     await saveSession(session);
 
     io.to(sessionId).emit("game-started", {
-      question:     session.question,
-      duration:     60,
-      players:      getPlayers(session),
-      roundNumber:  session.roundNumber,
-      totalRounds:  session.totalRounds,
+      question:        session.question,
+      roundStartTime,
+      roundDuration:   ROUND_DURATION,
+      players:         getPlayers(session),
+      roundNumber:     session.roundNumber,
+      totalRounds:     session.totalRounds,
     });
 
     setTimeout(async () => {
@@ -473,7 +493,7 @@ io.on("connection", (socket) => {
       if (s && s.status === "in-progress") {
         await endGame(sessionId, null);
       }
-    }, 60000);
+    }, ROUND_DURATION * 1000);
 
     cb({ success: true });
   });
@@ -548,6 +568,8 @@ io.on("connection", (socket) => {
     session.streakPlayerId   = null;
     session.streakCount      = 0;
     session.firstGameStarted = false;
+    session.roundStartTime   = null;
+    session.roundDuration    = null;
     session.gmQueue          = session.originalGmQueue.filter(id => session.players[id]);
 
     Object.values(session.players).forEach(p => {
@@ -590,6 +612,8 @@ io.on("connection", (socket) => {
 
   // ── DISCONNECT ──────────────────────────────────────────────────────────────
   socket.on("disconnect", async () => {
+    broadcastLiveCount();
+
     const sessionId = socketToSession[socket.id];
     delete socketToSession[socket.id];
 
@@ -604,14 +628,12 @@ io.on("connection", (socket) => {
     const token    = leavingPlayer.originalId;
     const socketId = socket.id;
 
-    // Grace period: give them 30s to reconnect before removing
     disconnectTimers[token] = setTimeout(async () => {
       delete disconnectTimers[token];
 
       const s = await getSession(sessionId);
       if (!s) return;
 
-      // If they already rejoined with a new socket, skip removal
       const stillThere = Object.values(s.players).find(p => p.originalId === token);
       if (!stillThere || stillThere.id !== socketId) return;
 
